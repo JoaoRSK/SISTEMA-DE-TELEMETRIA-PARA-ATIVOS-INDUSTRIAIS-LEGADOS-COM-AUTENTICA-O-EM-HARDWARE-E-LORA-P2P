@@ -1,0 +1,288 @@
+ROTEIRO 1 — SECURE BOOT V2
+Projeto: HardeningTeste
+Plataforma: Heltec WiFi LoRa 32 V2 / ESP32
+Framework: ESP-IDF via PlatformIO
+Objetivo: demonstrar que o ESP32 executa firmware assinado pela chave autorizada e bloqueia firmware assinado por outra chave.
+
+======================================================================
+1. PREPARAR UM FIRMWARE DE TESTE SIMPLES
+======================================================================
+
+Foi utilizada uma aplicação mínima em ESP-IDF. O firmware apenas inicializa o ESP32,
+mostra mensagens pela UART e incrementa um contador periodicamente.
+
+A ideia é simples: depois de habilitar o Secure Boot, o mesmo firmware deve continuar
+executando normalmente quando estiver corretamente assinado.
+
+No projeto utilizado:
+- ambiente PlatformIO: heltec_wifi_lora_32_V2;
+- framework: espidf;
+- monitor serial: 115200 baud;
+- aplicação principal: src/main.c.
+
+Antes de ativar qualquer proteção permanente, confirmar que:
+1. o projeto compila;
+2. o upload funciona;
+3. o monitor serial mostra "Firmware executando normalmente";
+4. a revisão do ESP32 é identificada corretamente.
+
+======================================================================
+2. REGISTRAR O ESTADO INICIAL DOS eFUSES
+======================================================================
+
+Antes do Secure Boot, salvar um resumo dos eFuses para comparação posterior.
+
+Exemplo no PowerShell:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espefuse.py --port COM3 summary
+
+No ensaio inicial, os campos importantes estavam aproximadamente assim:
+- ABS_DONE_1 = False;
+- JTAG_DISABLE = False;
+- RD_DIS = 0;
+- WR_DIS = 0;
+- BLOCK2 zerado e gravável.
+
+Guardar esse estado antes de continuar.
+
+======================================================================
+3. GERAR A CHAVE DE ASSINATURA DO SECURE BOOT V2
+======================================================================
+
+A chave utilizada foi RSA de 3072 bits.
+
+Comando utilizado:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py generate_signing_key --version 2 --scheme rsa3072 secure_boot_signing_key.pem
+
+Foi criado:
+secure_boot_signing_key.pem
+
+IMPORTANTE:
+Essa é a chave PRIVADA de assinatura. Ela não deve ser colocada no firmware,
+distribuída junto ao produto ou publicada.
+
+No ensaio também foi criado um backup:
+secure_boot_signing_key_backup.pem
+
+======================================================================
+4. GERAR O DIGEST DA CHAVE PÚBLICA
+======================================================================
+
+O ESP32 não precisa armazenar a chave privada. Para o Secure Boot V2 é utilizada
+uma informação derivada da chave pública autorizada.
+
+Comando utilizado:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py digest_sbv2_public_key --keyfile secure_boot_signing_key.pem --output digest.bin
+
+Resultado:
+digest.bin
+
+No ensaio, esse arquivo possuía 32 bytes.
+
+======================================================================
+5. AJUSTAR A REVISÃO MÍNIMA DO ESP32
+======================================================================
+
+Foi verificada a revisão do chip pelo log de inicialização:
+ESP32-D0WDQ6-V3 / revisão v3.1.
+
+No menuconfig foi utilizado:
+
+Component config
+  -> Hardware Settings
+    -> Chip revision
+      -> Minimum Supported ESP32 Revision
+        -> Rev v3.0 (ECO3)
+
+Isso mantém a configuração compatível com o ESP32 utilizado no ensaio.
+
+Abrir o menuconfig pelo PlatformIO:
+
+pio run -t menuconfig
+
+======================================================================
+6. HABILITAR O SECURE BOOT V2
+======================================================================
+
+No menuconfig:
+
+Security features
+  -> Enable hardware Secure Boot in bootloader
+
+Selecionar/configurar Secure Boot V2 com RSA.
+
+A configuração final do projeto registrou, entre outras, as opções:
+- CONFIG_SECURE_BOOT=y
+- CONFIG_SECURE_BOOT_V2_ENABLED=y
+- CONFIG_SECURE_BOOT_V2_RSA_ENABLED=y
+- CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+- CONFIG_SECURE_BOOT_SIGNING_KEY="secure_boot_signing_key.pem"
+- CONFIG_SECURE_SIGNED_ON_BOOT=y
+- CONFIG_SECURE_SIGNED_ON_UPDATE=y
+
+A chave informada ao processo de build foi:
+secure_boot_signing_key.pem
+
+======================================================================
+7. COMPILAR O PROJETO
+======================================================================
+
+Compilar:
+
+pio run
+
+O build deve gerar os binários assinados, incluindo arquivos como:
+- bootloader-signed.bin;
+- partitions-signed.bin;
+- firmware-signed.bin.
+
+O projeto utilizado também estava com Flash Encryption habilitada. Por isso,
+o diretório de build continha versões assinadas e versões criptografadas.
+
+======================================================================
+8. GRAVAR O FIRMWARE AUTORIZADO E ATIVAR O SECURE BOOT
+======================================================================
+
+Gravar o conjunto de bootloader, tabela de partições e firmware gerado pelo projeto.
+
+Durante a ativação, os eFuses associados ao Secure Boot passam a registrar
+permanentemente a chave/digest autorizado e o estado de ativação.
+
+Após a reinicialização, observar o monitor serial.
+
+Resultado esperado:
+
+secure boot v2 enabled
+secure boot verification succeeded
+
+Depois da verificação, a aplicação deve iniciar normalmente e continuar exibindo
+as mensagens do teste de hardening.
+
+No estado final dos eFuses foi observado:
+- ABS_DONE_1: False -> True;
+- BLOCK2: passou a conter a informação associada ao Secure Boot;
+- BLOCK2: passou a ficar protegido contra nova escrita;
+- JTAG_DISABLE: False -> True.
+
+======================================================================
+9. CRIAR UMA CHAVE NÃO AUTORIZADA
+======================================================================
+
+Para testar se o mecanismo realmente bloqueava outro firmware, foi criada uma
+segunda chave RSA 3072, diferente da chave registrada no ESP32.
+
+Comando utilizado:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py generate_signing_key --version 2 --scheme rsa3072 unauthorized_key.pem
+
+======================================================================
+10. ASSINAR O MESMO FIRMWARE COM A CHAVE ERRADA
+======================================================================
+
+Comando utilizado:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py sign_data --version 2 --keyfile unauthorized_key.pem --output firmware-unauthorized-signed.bin ".pio\build\heltec_wifi_lora_32_V2\firmware.bin"
+
+Foi gerado:
+firmware-unauthorized-signed.bin
+
+======================================================================
+11. VERIFICAR A ASSINATURA NO COMPUTADOR
+======================================================================
+
+Primeiro, verificar com a própria chave não autorizada:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py verify_signature --version 2 --keyfile unauthorized_key.pem ".\firmware-unauthorized-signed.bin"
+
+Resultado esperado:
+a assinatura é válida para essa chave.
+
+Depois, verificar o mesmo arquivo usando a chave autorizada:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py verify_signature --version 2 --keyfile secure_boot_signing_key.pem ".\firmware-unauthorized-signed.bin"
+
+Resultado esperado:
+a assinatura não pode ser verificada com a chave autorizada.
+
+======================================================================
+12. PREPARAR O FIRMWARE NÃO AUTORIZADO PARA A FLASH
+======================================================================
+
+Como o dispositivo utilizado no ensaio também estava com Flash Encryption ativa,
+o firmware assinado com a chave errada foi criptografado antes da gravação.
+
+O arquivo utilizado no ensaio foi:
+firmware-unauthorized-encrypted.bin
+
+A criptografia deve utilizar:
+- a mesma chave de Flash Encryption do dispositivo;
+- o endereço da aplicação na flash: 0x20000.
+
+======================================================================
+13. GRAVAR O FIRMWARE NÃO AUTORIZADO E OBSERVAR O BOOT
+======================================================================
+
+Gravar o firmware de teste na partição da aplicação e reiniciar o ESP32.
+
+O log obtido apresentou:
+
+secure boot v2 enabled
+...
+Verifying image signature...
+secure_boot_v2: Verifying with RSA-PSS...
+Sig block 0 signed with untrusted key
+Secure Boot V2 verification failed
+Secure boot signature verification failed
+image valid, signature bad
+Factory app partition is not bootable
+No bootable app partitions in the partition table
+
+Interpretação:
+- o arquivo estava estruturalmente válido;
+- a assinatura existia;
+- a assinatura foi produzida por uma chave não autorizada;
+- o ESP32 recusou a execução.
+
+Essa é a principal evidência experimental do Secure Boot.
+
+======================================================================
+14. RESTAURAR O FIRMWARE AUTORIZADO
+======================================================================
+
+Regravar o firmware produzido com a chave correta.
+
+Depois do reset, o log deve voltar a apresentar:
+
+secure boot v2 enabled
+secure boot verification succeeded
+
+e a aplicação deve executar normalmente.
+
+======================================================================
+15. CONCLUSÃO DO ENSAIO
+======================================================================
+
+A conclusão foi obtida comparando dois casos:
+
+CASO 1 — chave autorizada
+- assinatura reconhecida;
+- verificação bem-sucedida;
+- firmware executado.
+
+CASO 2 — chave diferente
+- assinatura identificada como não confiável;
+- Secure Boot V2 verification failed;
+- firmware bloqueado.
+
+Portanto, o ensaio demonstrou que o Secure Boot V2 impediu a execução de um
+firmware assinado por uma chave diferente daquela autorizada no dispositivo.
+
+======================================================================
+OBSERVAÇÃO IMPORTANTE
+======================================================================
+
+A ativação de Secure Boot e a gravação de eFuses possuem etapas irreversíveis.
+Repetir o procedimento somente em placa de teste e mantendo backup seguro da
+chave privada de assinatura.

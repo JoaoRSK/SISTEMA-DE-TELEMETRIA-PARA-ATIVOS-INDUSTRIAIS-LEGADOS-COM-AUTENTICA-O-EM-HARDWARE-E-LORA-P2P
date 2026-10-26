@@ -1,0 +1,4 @@
+# Dependências dos scripts de aquisição e análise em Python
+numpy
+matplotlib
+pyserial

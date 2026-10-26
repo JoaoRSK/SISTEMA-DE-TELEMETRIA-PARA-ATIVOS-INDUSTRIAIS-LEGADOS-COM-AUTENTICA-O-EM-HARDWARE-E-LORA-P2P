@@ -1,0 +1,289 @@
+ROTEIRO 2 — FLASH ENCRYPTION
+Projeto: HardeningTeste
+Plataforma: Heltec WiFi LoRa 32 V2 / ESP32
+Framework: ESP-IDF via PlatformIO
+Objetivo: demonstrar que o conteúdo gravado na flash não corresponde ao firmware
+em claro e que pode ser recuperado corretamente quando utilizada a chave autorizada.
+
+======================================================================
+1. VALIDAR O FIRMWARE SEM CRIPTOGRAFIA
+======================================================================
+
+Antes de habilitar Flash Encryption, foi utilizada a mesma aplicação mínima do
+teste de hardening.
+
+Confirmar:
+- compilação normal;
+- upload normal;
+- execução pela UART;
+- mensagens periódicas do firmware.
+
+Também foi salvo o estado inicial dos eFuses.
+
+Antes da ativação:
+- FLASH_CRYPT_CNT = 0;
+- FLASH_CRYPT_CONFIG = 0;
+- BLOCK1 estava disponível;
+- RD_DIS = 0;
+- WR_DIS = 0.
+
+======================================================================
+2. GERAR E GUARDAR A CHAVE DE FLASH ENCRYPTION
+======================================================================
+
+Foi utilizada uma chave de 256 bits armazenada no arquivo:
+
+my_flash_encryption_key.bin
+
+O backup utilizado no ensaio foi:
+
+my_flash_encryption_key_backup.bin
+
+O arquivo possui 32 bytes.
+
+IMPORTANTE:
+A chave não deve ser publicada nem incluída em documentação aberta.
+Ela é necessária para reproduzir/descriptografar os binários do ensaio.
+
+======================================================================
+3. INFORMAR A CHAVE AO PLATFORMIO
+======================================================================
+
+No platformio.ini foi utilizado:
+
+board_build.encryption_key = my_flash_encryption_key.bin
+
+O projeto também continha:
+
+extra_scripts = force_upload.py
+
+O script acrescentava "--force" ao comando de upload, necessário no fluxo de
+testes depois que as proteções começaram a ser habilitadas.
+
+Trecho do platformio.ini utilizado:
+
+[env:heltec_wifi_lora_32_V2]
+platform = espressif32
+board = heltec_wifi_lora_32_V2
+framework = espidf
+
+monitor_speed = 115200
+
+board_upload.flash_size = 2MB
+board_upload.maximum_size = 2097152
+
+board_build.encryption_key = my_flash_encryption_key.bin
+
+extra_scripts = force_upload.py
+
+======================================================================
+4. HABILITAR FLASH ENCRYPTION NO MENUCONFIG
+======================================================================
+
+Abrir:
+
+pio run -t menuconfig
+
+Entrar em:
+
+Security features
+  -> Enable flash encryption on boot
+
+A configuração utilizada ficou em modo de desenvolvimento.
+
+Principais opções registradas no sdkconfig:
+- CONFIG_SECURE_FLASH_ENC_ENABLED=y
+- CONFIG_SECURE_FLASH_ENCRYPTION_KEY_SOURCE_EFUSES=y
+- CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+- CONFIG_FLASH_ENCRYPTION_ENABLED=y
+- CONFIG_FLASH_ENCRYPTION_UART_BOOTLOADER_ALLOW_ENCRYPT=y
+
+No menu também foi mantida a opção para criptografar o conteúdo da aplicação
+até o tamanho da imagem.
+
+O modo de desenvolvimento foi escolhido porque os ensaios exigiam novas gravações
+pela UART.
+
+======================================================================
+5. GRAVAR A CHAVE NO BLOCO DE eFUSE DESTINADO À FLASH ENCRYPTION
+======================================================================
+
+A chave de Flash Encryption foi associada ao bloco de chave do ESP32.
+
+No ESP32 utilizado, o resultado final indicou:
+- BLOCK1 = Flash encryption key;
+- BLOCK1 protegido contra leitura;
+- BLOCK1 protegido contra escrita;
+- RD_DIS alterado para impedir a leitura do bloco de chave.
+
+Depois da proteção, o conteúdo de BLOCK1 passou a aparecer como "??" na leitura
+dos eFuses, acompanhado de "-/-".
+
+Isso é esperado: a chave continua utilizável internamente pelo hardware,
+mas deixa de ser legível externamente.
+
+======================================================================
+6. HABILITAR A CRIPTOGRAFIA PELO FLASH_CRYPT_CNT
+======================================================================
+
+No ensaio, o FLASH_CRYPT_CNT foi alterado de 0 para 1.
+
+O próprio espefuse mostrou:
+
+FLASH_CRYPT_CNT
+0b0000000 -> 0b0000001
+
+e exigiu a confirmação:
+
+This is an irreversible operation!
+Type 'BURN' (all capitals) to continue.
+
+Após a gravação, a ferramenta retornou:
+Successful
+
+O valor ímpar de FLASH_CRYPT_CNT indica Flash Encryption habilitada.
+
+======================================================================
+7. COMPILAR OS BINÁRIOS CRIPTOGRAFADOS
+======================================================================
+
+Compilar:
+
+pio run
+
+O diretório de build passou a conter arquivos como:
+- bootloader-encrypted.bin;
+- partitions-encrypted.bin;
+- firmware-encrypted.bin.
+
+Também permaneceram disponíveis os binários anteriores à etapa de criptografia,
+permitindo a comparação.
+
+======================================================================
+8. GRAVAR E INICIALIZAR O ESP32
+======================================================================
+
+Gravar os binários gerados pelo projeto e reiniciar a placa.
+
+No boot foi observada a indicação de que a Flash Encryption estava habilitada.
+
+A aplicação continuou executando normalmente.
+
+Isso é importante:
+o fato de a flash estar criptografada não impede a CPU de executar o firmware,
+porque o próprio hardware realiza a descriptografia no caminho de leitura
+autorizado.
+
+======================================================================
+9. LER DIRETAMENTE A REGIÃO DO FIRMWARE NA FLASH
+======================================================================
+
+O firmware da aplicação estava no endereço:
+
+0x20000
+
+Primeiro foi obtido o tamanho do firmware criptografado:
+
+$size = (Get-Item ".pio\build\heltec_wifi_lora_32_V2\firmware-encrypted.bin").Length
+$size
+
+No ensaio:
+145472 bytes
+
+Depois, a região foi lida diretamente da memória:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- esptool.py --port COM3 read_flash 0x20000 $size firmware_lido_flash.bin
+
+O arquivo:
+firmware_lido_flash.bin
+
+representa os bytes efetivamente recuperados da memória flash.
+
+======================================================================
+10. CALCULAR SHA-256 DOS ARQUIVOS
+======================================================================
+
+No PowerShell foram calculados os hashes:
+
+Get-FileHash ".pio\build\heltec_wifi_lora_32_V2\firmware.bin" -Algorithm SHA256
+
+Get-FileHash ".pio\build\heltec_wifi_lora_32_V2\firmware-encrypted.bin" -Algorithm SHA256
+
+Get-FileHash ".\firmware_lido_flash.bin" -Algorithm SHA256
+
+Resultados registrados no ensaio:
+
+Firmware original:
+72236FA1CC342470FCC07F721B1172129023053EC4364A9E56995BB5E92425D8
+
+Firmware criptografado:
+0463560B4034D9D6C05F14C399ED8444ADC49059B41EDC633E06BDB751474D19
+
+Conteúdo lido diretamente da flash:
+0463560B4034D9D6C05F14C399ED8444ADC49059B41EDC633E06BDB751474D19
+
+======================================================================
+11. INTERPRETAR A COMPARAÇÃO
+======================================================================
+
+Observação 1:
+SHA256(firmware original) != SHA256(conteúdo lido da flash)
+
+Logo, uma leitura direta da flash não recuperou o firmware original em claro.
+
+Observação 2:
+SHA256(firmware criptografado) == SHA256(conteúdo lido da flash)
+
+Logo, os bytes recuperados fisicamente da região correspondem ao conteúdo
+criptografado.
+
+Essa comparação foi a principal evidência utilizada para concluir que a
+Flash Encryption estava funcionando.
+
+======================================================================
+12. REALIZAR O TESTE INVERSO — DESCRIPTOGRAFAR
+======================================================================
+
+Também foi testada a operação inversa com espsecure.py.
+
+No fluxo combinado com Secure Boot, foram utilizados comandos do tipo:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py decrypt_flash_data --keyfile my_flash_encryption_key.bin --address 0x1000 --output bootloader-decrypted-check.bin ".pio\build\heltec_wifi_lora_32_V2\bootloader-encrypted.bin"
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py decrypt_flash_data --keyfile my_flash_encryption_key.bin --address 0x10000 --output partitions-decrypted-check.bin ".pio\build\heltec_wifi_lora_32_V2\partitions-encrypted.bin"
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espsecure.py decrypt_flash_data --keyfile my_flash_encryption_key.bin --address 0x20000 --output firmware-decrypted-check.bin ".pio\build\heltec_wifi_lora_32_V2\firmware-encrypted.bin"
+
+Depois foram calculados os SHA-256 para confirmar que os arquivos descriptografados
+eram iguais às versões em claro correspondentes.
+
+No caso do firmware protegido também por Secure Boot, a comparação correta é feita
+com o firmware assinado antes da criptografia.
+
+======================================================================
+13. CONCLUSÃO DO ENSAIO
+======================================================================
+
+A conclusão foi baseada em quatro evidências:
+
+1. o ESP32 inicializou indicando Flash Encryption ativa;
+2. a aplicação continuou executando normalmente;
+3. a leitura direta da flash apresentou hash diferente do firmware em claro;
+4. a leitura direta apresentou o mesmo hash do firmware criptografado.
+
+Além disso, a descriptografia utilizando a chave correta recuperou o conteúdo
+esperado.
+
+Portanto, o ensaio demonstrou que o firmware estava armazenado na memória flash
+em forma criptografada e não diretamente como o binário original.
+
+======================================================================
+OBSERVAÇÃO IMPORTANTE
+======================================================================
+
+O ensaio foi mantido em DEVELOPMENT MODE para permitir regravações pela UART.
+Esse modo foi adequado para experimentação e validação, mas não representa a
+configuração mais restritiva possível para um produto final.
+
+A chave de Flash Encryption deve ser mantida em backup seguro.
+A gravação e proteção dos eFuses é irreversível.

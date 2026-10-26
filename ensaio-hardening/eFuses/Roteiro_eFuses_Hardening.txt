@@ -1,0 +1,265 @@
+ROTEIRO 3 — eFUSES E VERIFICAÇÃO DO HARDENING
+Projeto: HardeningTeste
+Plataforma: Heltec WiFi LoRa 32 V2 / ESP32
+Objetivo: registrar quais eFuses mudaram durante a ativação do Secure Boot e da
+Flash Encryption e usar essa comparação como evidência de que as proteções foram
+gravadas permanentemente no microcontrolador.
+
+======================================================================
+1. POR QUE OS eFUSES FORAM ANALISADOS
+======================================================================
+
+Secure Boot e Flash Encryption dependem de configurações armazenadas em eFuses.
+
+Os eFuses são permanentes:
+depois que determinados bits são queimados, eles não retornam ao estado anterior.
+
+Por isso, a estratégia do ensaio foi:
+
+1. ler os eFuses antes;
+2. ativar os mecanismos de segurança;
+3. ler novamente;
+4. comparar os campos relevantes.
+
+======================================================================
+2. LER OS eFUSES ANTES DO HARDENING
+======================================================================
+
+Com a placa conectada pela porta serial:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espefuse.py --port COM3 summary
+
+Salvar o resultado em um arquivo, por exemplo:
+
+efuses_antes.txt
+
+Estado inicial registrado no ensaio:
+
+FLASH_CRYPT_CNT = 0
+FLASH_CRYPT_CONFIG = 0
+ABS_DONE_1 = False
+JTAG_DISABLE = False
+RD_DIS = 0, R/W
+WR_DIS = 0
+BLOCK1 = zerado, R/W
+BLOCK2 = zerado, R/W
+UART_DOWNLOAD_DIS = False
+
+======================================================================
+3. ATIVAR FLASH ENCRYPTION
+======================================================================
+
+A Flash Encryption utilizou:
+my_flash_encryption_key.bin
+
+A chave foi associada ao bloco destinado à chave de criptografia da flash.
+
+Ao final da configuração:
+- BLOCK1 passou a representar a Flash encryption key;
+- BLOCK1 ficou protegido contra leitura e escrita;
+- RD_DIS passou a proteger o acesso de leitura ao bloco;
+- FLASH_CRYPT_CONFIG passou para 15 (0xF);
+- FLASH_CRYPT_CNT passou de 0 para 1.
+
+No ensaio houve uma gravação explícita de FLASH_CRYPT_CNT.
+
+A ferramenta apresentou:
+
+FLASH_CRYPT_CNT
+0b0000000 -> 0b0000001
+
+antes de solicitar a confirmação irreversível.
+
+======================================================================
+4. ATIVAR SECURE BOOT V2
+======================================================================
+
+O Secure Boot utilizou:
+secure_boot_signing_key.pem
+
+Foi gerado:
+digest.bin
+
+Após a ativação:
+- ABS_DONE_1 passou de False para True;
+- BLOCK2 passou a conter a informação associada à chave autorizada;
+- BLOCK2 ficou protegido contra novas escritas;
+- JTAG_DISABLE passou de False para True.
+
+O estado final mostra Secure Boot V2 habilitado permanentemente.
+
+======================================================================
+5. DESABILITAÇÃO DO JTAG
+======================================================================
+
+Antes:
+JTAG_DISABLE = False
+
+Depois:
+JTAG_DISABLE = True
+
+A interface JTAG é utilizada para depuração e acesso de baixo nível ao
+microcontrolador.
+
+Sua desabilitação reduz uma possível interface de acesso após o hardening.
+
+No ensaio, o JTAG permaneceu desabilitado no estado final.
+
+======================================================================
+6. PROTEÇÃO DO BLOCO DA CHAVE DE FLASH ENCRYPTION
+======================================================================
+
+Antes:
+BLOCK1 = 00 00 00 ... 00
+estado R/W
+
+Depois:
+BLOCK1 = ?? ?? ?? ... ??
+estado -/-
+
+Isso não significa que a chave desapareceu.
+
+Significa que:
+- a chave foi gravada;
+- o hardware ainda pode utilizá-la internamente;
+- a leitura externa foi bloqueada;
+- novas escritas foram bloqueadas.
+
+A alteração de RD_DIS e WR_DIS está relacionada a essas proteções.
+
+======================================================================
+7. BLOCO ASSOCIADO AO SECURE BOOT
+======================================================================
+
+Antes:
+BLOCK2 zerado, R/W
+
+Depois:
+BLOCK2 contém a informação de Secure Boot e aparece como R/-
+
+Interpretação:
+- o valor necessário à verificação do Secure Boot permanece acessível ao hardware;
+- o bloco não pode ser sobrescrito por uma nova chave/digest após a proteção.
+
+======================================================================
+8. UART FOI MANTIDA DISPONÍVEL DURANTE O ENSAIO
+======================================================================
+
+A UART foi necessária para carregar diferentes firmwares durante os testes.
+
+Por isso, o modo de download serial não foi totalmente bloqueado.
+
+No estado final:
+UART_DOWNLOAD_DIS = False
+
+Também permaneceram permissões compatíveis com o modo de desenvolvimento da
+Flash Encryption.
+
+Isso foi intencional para permitir:
+- gravação do firmware válido;
+- gravação do firmware assinado com chave não autorizada;
+- restauração do firmware válido;
+- repetição dos ensaios.
+
+======================================================================
+9. LER OS eFUSES APÓS O HARDENING
+======================================================================
+
+Repetir:
+
+pio pkg exec --package "platformio/tool-esptoolpy" -- espefuse.py --port COM3 summary
+
+No projeto também foi salvo um estado final estruturado:
+efuses_final.json
+
+Principais resultados finais:
+
+FLASH_CRYPT_CNT = 1
+FLASH_CRYPT_CONFIG = 15
+ABS_DONE_1 = True
+JTAG_DISABLE = True
+RD_DIS = 1 e protegido contra escrita
+WR_DIS = 385 (0x0181)
+BLOCK1 = Flash encryption key, protegido
+BLOCK2 = Secure Boot key/digest, protegido contra escrita
+UART_DOWNLOAD_DIS = False
+SECURE_VERSION = 0
+
+======================================================================
+10. TABELA DE COMPARAÇÃO UTILIZADA NA CONCLUSÃO
+======================================================================
+
+Campo                 Antes                  Depois
+----------------------------------------------------------------------
+FLASH_CRYPT_CNT       0                      1
+FLASH_CRYPT_CONFIG    0                      15 (0xF)
+ABS_DONE_1            False                  True
+JTAG_DISABLE          False                  True
+RD_DIS                0, R/W                 1, R/-
+WR_DIS                0                      385 (0x0181)
+BLOCK1                zerado, R/W            chave protegida, -/-
+BLOCK2                zerado, R/W            chave/digest, R/-
+UART_DOWNLOAD_DIS     False                  False
+
+======================================================================
+11. COMO ESSA TABELA LEVA À CONCLUSÃO
+======================================================================
+
+FLASH_CRYPT_CNT = 1
+-> mostra que a Flash Encryption ficou habilitada.
+
+FLASH_CRYPT_CONFIG = 0xF
+-> registra a configuração utilizada para a criptografia da flash.
+
+ABS_DONE_1 = True
+-> confirma a ativação permanente do Secure Boot V2.
+
+JTAG_DISABLE = True
+-> confirma que a interface de depuração JTAG foi desabilitada.
+
+BLOCK1 protegido
+-> confirma que a chave de Flash Encryption foi gravada e não ficou exposta
+   para leitura externa.
+
+BLOCK2 protegido contra escrita
+-> confirma que a informação autorizada para Secure Boot ficou registrada e
+   não pode ser simplesmente substituída.
+
+RD_DIS e WR_DIS alterados
+-> confirmam a aplicação das proteções de leitura/escrita relacionadas aos
+   blocos de segurança.
+
+UART_DOWNLOAD_DIS = False
+-> confirma que a UART foi deliberadamente mantida disponível para os ensaios.
+
+======================================================================
+12. CONCLUSÃO DO ENSAIO
+======================================================================
+
+A comparação entre o estado inicial e o estado final dos eFuses mostrou que:
+
+- a Flash Encryption foi habilitada;
+- o Secure Boot V2 foi habilitado;
+- a chave de criptografia da flash ficou protegida;
+- a informação utilizada pelo Secure Boot ficou protegida contra substituição;
+- a interface JTAG foi desabilitada;
+- a UART permaneceu disponível para permitir os testes em modo de desenvolvimento.
+
+Assim, os eFuses serviram como evidência permanente de que as configurações de
+hardening realmente haviam sido aplicadas ao ESP32.
+
+======================================================================
+ALERTA — ETAPA IRREVERSÍVEL
+======================================================================
+
+A gravação de eFuses é irreversível.
+
+Antes de qualquer operação de burn:
+1. conferir o modelo/revisão exata do ESP32;
+2. salvar o summary inicial;
+3. manter backup das chaves;
+4. conferir duas vezes o campo e o valor;
+5. utilizar uma placa destinada a teste;
+6. não desabilitar a UART antes de concluir todos os ensaios necessários.
+
+Nunca executar comandos de burn apenas para "testar" se o procedimento funciona.

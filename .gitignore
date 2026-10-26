@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# ESP-IDF / PlatformIO / editores
+.pio/
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+.vscode/
+.idea/
+
+# Chaves, certificados e configurações particulares
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+*.jks
+*.crt
+*.cer
+**/gateway_key.h
+**/puf_indices.h
+
+# Amostras brutas de PUF e resultados locais
+**/puf_samples/
+**/puf_samples_*/
+**/puf_analysis/
+**/coletas/
+**/resultados/
+**/sample_*.bin
+*.bin
+
+# Sistemas operacionais
+.DS_Store
+Thumbs.db
